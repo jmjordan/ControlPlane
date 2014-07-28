@@ -1396,6 +1396,18 @@ static NSSet *sharedActiveContexts = nil;
 #pragma mark -
 #pragma mark Updating queue stuff
 
+- (NSArray *)getRulesForContext:(NSString *)contextUUID {
+    NSMutableArray *rules = [[NSMutableArray alloc] init];
+    
+    for (NSDictionary *rule in self.rules) {
+        if ([rule[@"context"] isEqualToString:contextUUID]) {
+            [rules addObject:rule];
+        }
+    }
+    
+    return rules;
+}
+
 // this method is the meat of ControlPlane, it is the engine that
 // determines if matching rules add up to the required confidence level
 // and initiates a switch from one context to another
@@ -1415,24 +1427,46 @@ static NSSet *sharedActiveContexts = nil;
     }
     self.forceOneFullUpdate = NO;
     
+    NSMutableDictionary *matchingContextUUIDs = [[NSMutableDictionary alloc] init];
+    
+    for (NSString *contextUUID in [contextsDataSource arrayOfUUIDs]){
+        double matchingRulesCount = 0;
+        NSArray *rulesForContext = [self getRulesForContext:contextUUID];
+        for(NSDictionary *contextRule in rulesForContext) {
+            if ([matchingRules containsObject:contextRule]) {
+                matchingRulesCount++;
+            }
+        }
+        if (rulesForContext.count > 0) {
+            double percentMatched = matchingRulesCount/rulesForContext.count;
+            matchingContextUUIDs[contextUUID] = [NSNumber numberWithDouble:percentMatched ];
+        } else {
+            matchingContextUUIDs[contextUUID] = @0.0;
+        }
+        
+        [contextsDataSource contextByUUID:contextUUID].confidence = matchingContextUUIDs[contextUUID];
+        
+
+    }
+    
     // of the configured contexts, which ones have rule hits?
-    NSMutableDictionary *guesses = [self getGuessesForRules:matchingRules];
+//    NSMutableDictionary *guesses = [self getGuessesForRules:matchingRules];
     
     // Don't include the default context yet because
     // under multiple active contexts it'll show as active
     // when it shouldn't (default context always meets minimum
     // confidence required)
     if (![self useMultipleActiveContexts])
-        [self applyDefaultContextTo:guesses];
+        [self applyDefaultContextTo:matchingContextUUIDs];
     
-    DSLog(@"Context guesses: %@", guesses);
+    DSLog(@"Context guesses: %@", matchingContextUUIDs);
     
-    [contextsDataSource updateConfidencesFromGuesses:guesses];
+//    [contextsDataSource updateConfidencesFromGuesses:guesses];
     
     
     
     if ([self useMultipleActiveContexts]) {
-        [self changeActiveContextsBasedOnGuesses:guesses];
+        [self changeActiveContextsBasedOnGuesses:matchingContextUUIDs];
     } else {
         // prevent switching contexts when the current one is forced and sticky
         // this only makes sense for single active context mode
@@ -1441,7 +1475,7 @@ static NSSet *sharedActiveContexts = nil;
         }
         // use the older style of context matching
         // of the guesses, which one has the highest confidence rating?
-        Context *guessContext = [self getMostConfidentContext:guesses];
+        Context *guessContext = [self getMostConfidentContext:matchingContextUUIDs];
         
         if (guessContext && [self guessMeetsConfidenceRequirement:guessContext]) {
             [self increaseActionsInProgress];
@@ -1470,6 +1504,19 @@ static NSSet *sharedActiveContexts = nil;
         }
         
         Context *context = [contextsDataSource contextByUUID:key];
+        NSArray *parentContexts = [contextsDataSource walkToRoot:context.parentUUID];
+        for (Context *parentContext in parentContexts) {
+            if ([guesses[parentContext.uuid] doubleValue] < minConfidence) {
+#ifdef DEBUG_MODE
+                DSLog(@"%@'s parents do not meet requirements", [contextsDataSource contextByUUID:key].name);
+#endif
+                return;
+            }
+        }
+
+        
+        
+        
 #ifdef DEBUG_MODE
         DSLog(@"%@ meets requirements", context.name);
 #endif
